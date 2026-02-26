@@ -1,717 +1,590 @@
-Attribute VB_Name = "BOM_MACRO"
+' ╔════════════════════════════════════════════════════════════════╗
+' ║  SolidWorks BOM Export Macro — v2.0 Final                    ║
+' ║                                                              ║
+' ║  Montaj parcalarini resimli olarak Excel'e aktarir.          ║
+' ║                                                              ║
+' ║  Sutunlar:                                                   ║
+' ║  Resim | Sira No | Parca Adi | Konfigurasyon | Malzeme       ║
+' ║        | Miktar  | Birim Agirlik (kg) | Net Agirlik (kg)     ║
+' ╚════════════════════════════════════════════════════════════════╝
+'
+'  KURULUM:
+'  ────────────────────────────────────────────────────────────────
+'  1. SolidWorks'te VBA Editor'u acin  →  Alt + F11
+'
+'  2. MODUL EKLE:
+'     Insert > Module
+'     Asagidaki "══ MODULE KODU BASLANGIC ══" ile
+'     "══ MODULE KODU BITIS ══" arasindaki kodu yapistirin.
+'
+'  3. CLASS MODULE EKLE:
+'     Insert > Class Module
+'     Properties penceresinden Name = "CBomRow" yapin
+'     Asagidaki "══ CLASS KODU BASLANGIC ══" ile
+'     "══ CLASS KODU BITIS ══" arasindaki kodu yapistirin.
+'
+'  4. Bir montaj dosyasi (.SLDASM) acin ve makroyu calistirin.
+'  ────────────────────────────────────────────────────────────────
+'
+'  OZELLIKLER:
+'  - FeatureManager agac sirasi korunur
+'  - Ayni parca+konfig otomatik gruplanir (miktar artar)
+'  - Alt montajlar icine inilir, sadece parcalar listelenir
+'  - Model kapali parcalar listelenir → agirlik/resim "?" olur
+'  - Agirlik 2 ondalik hassasiyetle gosterilir
+'  - Resimler SolidWorks preview'dan alinir
+'  - Resimler hucreye civilenir (Placement = xlMoveAndSizeWithCells)
+'  - Her resim oncesi satira scroll yapilir (kayma onlenir)
+'
+
+
+' ══════════════════════════════════════════════════════════════════
+' ══  MODULE KODU BASLANGIC                                     ══
+' ══  (Insert > Module icine yapistirin)                        ══
+' ══════════════════════════════════════════════════════════════════
+
 Option Explicit
 
-' ==============================================================================
-' SOLIDWORKS BOM OLUŞTURUCU MAKRO
-' ==============================================================================
-' Versiyon: 2.0
-' Uyumluluk: SolidWorks 2020 ve üzeri, Windows 10/11
-' 
-' ÖZELLİKLER:
-' - Tüm parçaları (alt montajlar dahil) otomatik toplar
-' - Unsur ağacı sıralamasını korur
-' - Her parça için küçük resim gösterir
-' - Malzeme, kütle ve adet bilgilerini listeler
-' - Excel'de profesyonel BOM listesi oluşturur
-'
-' KULLANIM:
-' 1. SolidWorks'te bir montaj dosyası açın
-' 2. Alt+F11 ile VBA editörünü açın
-' 3. Bu kodu bir modül olarak ekleyin
-' 4. Main() makrosunu çalıştırın
-'
-' NOT: Kütle bilgileri kg cinsinden hesaplanır
-' ==============================================================================
+Dim gRows As Collection
 
-' Excel sabitleri
-Private Const xlCalculationManual    As Long = -4135
-Private Const xlCalculationAutomatic As Long = -4105
-Private Const xlMoveAndSize          As Long = 1
-Private Const xlHAlignCenter         As Long = -4108
-Private Const xlVAlignCenter         As Long = -4108
+' ─────────────────────────────────────────────
+'  ANA MAKRO
+' ─────────────────────────────────────────────
+Sub ExportBomToExcel()
 
-' SolidWorks sabitleri
-Private Const swDocPART              As Long = 1
-Private Const swDocASSEMBLY          As Long = 2
+    Dim swApp     As Object
+    Dim swModel   As Object
+    Dim finalRows As Collection
 
-' Görsel ayarları
-Private Const THUMB_ROW_HEIGHT       As Double = 70
-Private Const THUMB_MARGIN_PT        As Double = 4
-Private Const COL_WIDTH_THUMB        As Double = 12
+    Set swApp   = Application.SldWorks
+    Set swModel = swApp.ActiveDoc
 
-Private m_PS1Path As String
-
-' ==============================================================================
-' ANA FONKSİYON - BOM LİSTESİ OLUŞTURUR
-' ==============================================================================
-Public Sub Main()
-    On Error GoTo FATAL
-
-    ' SolidWorks uygulamasını al
-    Dim swApp As Object, swAssy As Object
-    Set swApp = Application.SldWorks
-    If swApp Is Nothing Then
-        MsgBox "SolidWorks bulunamadı. Lütfen SolidWorks'ü çalıştırın.", vbCritical, "Hata"
+    If swModel Is Nothing Then
+        MsgBox "Acik bir dokuman bulunamadi!", vbExclamation, "Parca Listesi"
         Exit Sub
     End If
 
-    ' Aktif dokümanı kontrol et
-    Set swAssy = swApp.ActiveDoc
-    If swAssy Is Nothing Then
-        MsgBox "Lütfen bir montaj dosyası açın.", vbExclamation, "Uyarı"
-        Exit Sub
-    End If
-    
-    If swAssy.GetType <> swDocASSEMBLY Then
-        MsgBox "Lütfen bir montaj (SLDASM) dosyası açın.", vbExclamation, "Uyarı"
+    If swModel.GetType <> 2 Then
+        MsgBox "Lutfen bir montaj dosyasi (.SLDASM) acin.", vbExclamation, "Parca Listesi"
         Exit Sub
     End If
 
-    ' Tüm parçaları topla
-    Dim orderedComps As Variant
-    orderedComps = GetAllComponentsRecursive(swAssy)
-    If IsEmpty(orderedComps) Then
-        MsgBox "Montajda hiç parça bulunamadı.", vbInformation, "Bilgi"
+    Set gRows = New Collection
+    TraverseModel swModel
+
+    If gRows.Count = 0 Then
+        MsgBox "Listelenecek parca bulunamadi.", vbInformation, "Parca Listesi"
         Exit Sub
     End If
 
-    ' Thumbnail script'ini hazırla
-    m_PS1Path = WriteThumbnailScript()
+    Set finalRows = GroupRows(gRows)
+    WriteToExcel finalRows, swApp
 
-    ' Parça bilgilerini topla ve sınıflandır
-    Dim dict As Object: Set dict = CreateObject("Scripting.Dictionary")
-    Dim orderList As Collection: Set orderList = New Collection
-    Dim i As Long, swComp As Object, swPDoc As Object
-    Dim sPath As String, sCfg As String, key As String
-    Dim idx As Long: idx = 0
+    MsgBox finalRows.Count & " parca eklendi.", _
+           vbInformation, "Parca Listesi"
 
-    For i = LBound(orderedComps) To UBound(orderedComps)
-        Set swComp = orderedComps(i)
-        If swComp Is Nothing Then GoTo NextComp
-        
-        ' Bastırılmış, zarf veya BOM'dan hariç parçaları atla
-        If SafeIsSuppressed(swComp) Or SafeIsEnvelope(swComp) Or SafeExcludeFromBOM(swComp) Then
-            GoTo NextComp
-        End If
+End Sub
 
-        Set swPDoc = swComp.GetModelDoc2
-        If swPDoc Is Nothing Then GoTo NextComp
-        If swPDoc.GetType <> swDocPART Then GoTo NextComp
+' ─────────────────────────────────────────────
+'  MONTAJ AGACI DOLASMA
+' ─────────────────────────────────────────────
+Private Sub TraverseModel(swModel As Object)
 
-        ' Parça bilgilerini al
-        sPath = swPDoc.GetPathName
-        If Len(sPath) = 0 Then sPath = swComp.Name2
-        
-        sCfg = swComp.ReferencedConfiguration
-        If Len(sCfg) = 0 Then sCfg = swPDoc.GetActiveConfigurationName
+    Dim swFeat As Object, nxt As Object
+    Dim ft     As String
 
-        ' Benzersiz anahtar oluştur (dosya yolu + konfigürasyon)
-        key = LCase$(sPath) & "::" & LCase$(sCfg)
+    If swModel Is Nothing Then Exit Sub
 
-        If dict.Exists(key) Then
-            ' Mevcut parçanın adedini artır
-            Dim ar As Variant
-            ar = dict(key)
-            ar(1) = ar(1) + 1
-            dict(key) = ar
+    On Error Resume Next
+    Set swFeat = swModel.FirstFeature
+    On Error GoTo 0
+
+    Do While Not swFeat Is Nothing
+        ft = ""
+        On Error Resume Next: ft = swFeat.GetTypeName2: On Error GoTo 0
+
+        If ft = "Reference" Or ft = "ReferencePattern" Then ProcessFeat swFeat
+
+        Set nxt = Nothing
+        On Error Resume Next: Set nxt = swFeat.GetNextFeature: On Error GoTo 0
+        Set swFeat = nxt
+    Loop
+
+End Sub
+
+Private Sub TraverseComp(swComp As Object)
+
+    Dim swFeat As Object, nxt As Object
+    Dim ft     As String
+
+    If swComp Is Nothing Then Exit Sub
+
+    On Error Resume Next
+    Set swFeat = swComp.FirstFeature
+    On Error GoTo 0
+
+    Do While Not swFeat Is Nothing
+        ft = ""
+        On Error Resume Next: ft = swFeat.GetTypeName2: On Error GoTo 0
+
+        If ft = "Reference" Or ft = "ReferencePattern" Then ProcessFeat swFeat
+
+        Set nxt = Nothing
+        On Error Resume Next: Set nxt = swFeat.GetNextFeature: On Error GoTo 0
+        Set swFeat = nxt
+    Loop
+
+End Sub
+
+' ─────────────────────────────────────────────
+'  FEATURE ISLEME
+' ─────────────────────────────────────────────
+Private Sub ProcessFeat(swFeat As Object)
+
+    Dim swComp      As Object
+    Dim swCompModel As Object
+    Dim rawPath     As String
+    Dim cfg         As String
+    Dim isSup       As Boolean
+    Dim isExcl      As Boolean
+    Dim compType    As Integer
+    Dim row         As CBomRow
+
+    If swFeat Is Nothing Then Exit Sub
+
+    Set swComp = Nothing
+    On Error Resume Next: Set swComp = swFeat.GetSpecificFeature2: On Error GoTo 0
+    If swComp Is Nothing Then Exit Sub
+
+    ' Bastirilmis veya BOM-disinda ise atla
+    isSup = False: isExcl = False
+    On Error Resume Next
+    isSup = swComp.IsSuppressed
+    isExcl = swComp.ExcludeFromBOM
+    On Error GoTo 0
+    If isSup Or isExcl Then Exit Sub
+
+    ' Dosya yolu
+    rawPath = ""
+    On Error Resume Next: rawPath = Trim(swComp.GetPathName): On Error GoTo 0
+    If rawPath = "" Then Exit Sub
+
+    ' Konfigurasyon
+    cfg = ""
+    On Error Resume Next: cfg = Trim(swComp.ReferencedConfiguration): On Error GoTo 0
+    If cfg = "" Then cfg = "Default"
+
+    ' Model referansi
+    Set swCompModel = Nothing
+    On Error Resume Next: Set swCompModel = swComp.GetModelDoc2: On Error GoTo 0
+
+    ' Komponent tipi belirle
+    compType = 0
+    If Not swCompModel Is Nothing Then
+        On Error Resume Next: compType = swCompModel.GetType: On Error GoTo 0
+    End If
+    If compType = 0 Then
+        If LCase(Right(rawPath, 7)) = ".sldprt" Then compType = 1
+        If LCase(Right(rawPath, 7)) = ".sldasm" Then compType = 2
+    End If
+
+    Select Case compType
+        Case 1  ' Parca → listeye ekle
+            Set row = New CBomRow
+            row.parcaAdi  = FileNameNoExt(rawPath)
+            row.konfig    = cfg
+            row.dosyaYolu = rawPath
+            row.miktar    = 1
+            row.key       = LCase(rawPath) & "::" & LCase(cfg)
+            row.modelAcik = Not (swCompModel Is Nothing)
+            row.agirlik   = GetMassKg(swCompModel)
+            row.malzeme   = GetMalzeme(swCompModel)
+            gRows.Add row
+
+        Case 2  ' Alt montaj → icine in
+            TraverseComp swComp
+    End Select
+
+End Sub
+
+' ─────────────────────────────────────────────
+'  GRUPLAMA (ayni parca + konfig → miktar artar)
+' ─────────────────────────────────────────────
+Private Function GroupRows(src As Collection) As Collection
+
+    Dim result  As Collection
+    Dim dict    As Object
+    Dim i       As Integer
+    Dim r       As CBomRow
+    Dim ex      As CBomRow
+
+    Set result = New Collection
+    Set dict   = CreateObject("Scripting.Dictionary")
+
+    For i = 1 To src.Count
+        Set r = src(i)
+        If dict.Exists(r.key) Then
+            Set ex = result(dict(r.key))
+            ex.miktar = ex.miktar + 1
         Else
-            ' Yeni parça ekle
-            idx = idx + 1
-            Dim tp As String: tp = GetShellThumbnail(sPath, idx)
-            dict.Add key, Array(GetCleanName(swComp.Name2), 1, _
-                                GetMaterialSafe(swPDoc, sCfg), _
-                                GetMass_KG(swComp, swPDoc, sCfg), tp)
-            orderList.Add key
+            result.Add r
+            dict.Add r.key, result.Count
         End If
-NextComp:
     Next i
 
-    ' Geçici script dosyasını temizle
-    On Error Resume Next
-    If Len(m_PS1Path) > 0 Then
-        If Dir(m_PS1Path) <> "" Then Kill m_PS1Path
-    End If
-    On Error GoTo FATAL
+    Set GroupRows = result
 
-    ' Parça kontrolü
-    If dict.Count = 0 Then
-        MsgBox "BOM'a eklenecek parça bulunamadı.", vbInformation, "Bilgi"
-        Exit Sub
-    End If
-
-    ' Excel'i başlat
-    Dim xlApp As Object, xlBook As Object, xlSheet As Object
-    On Error Resume Next
-    Set xlApp = GetObject(, "Excel.Application")
-    If xlApp Is Nothing Then Set xlApp = CreateObject("Excel.Application")
-    On Error GoTo FATAL
-
-    xlApp.ScreenUpdating = False
-    SetExcelCalc xlApp, xlCalculationManual
-
-    ' Yeni çalışma kitabı oluştur
-    Set xlBook = xlApp.Workbooks.Add
-    Set xlSheet = xlBook.Worksheets(1)
-    xlSheet.Name = "BOM Listesi"
-
-    ' Başlık satırını oluştur
-    xlSheet.Cells(1, 1).Value = "GÖRSEL"
-    xlSheet.Cells(1, 2).Value = "PARÇA ADI"
-    xlSheet.Cells(1, 3).Value = "MALZEME"
-    xlSheet.Cells(1, 4).Value = "ADET"
-    xlSheet.Cells(1, 5).Value = "BİRİM AĞIRLIK (kg)"
-    xlSheet.Cells(1, 6).Value = "TOPLAM AĞIRLIK (kg)"
-
-    ' Başlık satırını formatla
-    With xlSheet.Range("A1:F1")
-        .Font.Bold = True
-        .Interior.Color = RGB(30, 30, 30)
-        .Font.Color = RGB(255, 255, 255)
-        .HorizontalAlignment = xlHAlignCenter
-        .VerticalAlignment = xlVAlignCenter
-        .WrapText = False
-    End With
-    xlSheet.Rows(1).RowHeight = 24
-
-    ' Sütun genişliklerini ayarla
-    xlSheet.Columns("A:A").ColumnWidth = COL_WIDTH_THUMB
-    xlSheet.Columns("B:B").ColumnWidth = 36
-    xlSheet.Columns("C:C").ColumnWidth = 22
-    xlSheet.Columns("D:D").ColumnWidth = 8
-    xlSheet.Columns("D:D").HorizontalAlignment = xlHAlignCenter
-    xlSheet.Columns("E:F").ColumnWidth = 20
-
-    ' Parça verilerini Excel'e yaz
-    Dim r As Long: r = 2
-    Dim ii As Long, k As Variant, d As Variant, tf As String
-
-    For ii = 1 To orderList.Count
-        k = orderList(ii)
-        d = dict(k)
-        tf = CStr(d(4))
-
-        xlSheet.Rows(r).RowHeight = THUMB_ROW_HEIGHT
-
-        ' Küçük resim ekle
-        If Len(tf) > 0 Then
-            On Error Resume Next
-            If Dir(tf) <> "" Then
-                Dim cellW As Double, cellH As Double
-                Dim imgSz As Double, imgL As Double, imgT As Double
-                
-                cellW = xlSheet.Cells(r, 1).Width
-                cellH = xlSheet.Rows(r).Height
-                imgSz = cellW - (2 * THUMB_MARGIN_PT)
-                
-                If (cellH - 2 * THUMB_MARGIN_PT) < imgSz Then
-                    imgSz = cellH - (2 * THUMB_MARGIN_PT)
-                End If
-                If imgSz < 8 Then imgSz = 8
-                
-                imgL = xlSheet.Cells(r, 1).Left + (cellW - imgSz) / 2
-                imgT = xlSheet.Cells(r, 1).Top + (cellH - imgSz) / 2
-
-                Dim shp As Object
-                Set shp = xlSheet.Shapes.AddPicture(tf, False, True, imgL, imgT, imgSz, imgSz)
-                If Not shp Is Nothing Then
-                    shp.LockAspectRatio = False
-                    shp.Width = imgSz
-                    shp.Height = imgSz
-                    shp.Left = imgL
-                    shp.Top = imgT
-                    shp.Placement = xlMoveAndSize
-                    Set shp = Nothing
-                End If
-            End If
-            On Error GoTo FATAL
-        End If
-
-        ' Parça bilgilerini yaz
-        xlSheet.Cells(r, 2).Value = d(0)  ' Parça Adı
-        xlSheet.Cells(r, 3).Value = d(2)  ' Malzeme
-        xlSheet.Cells(r, 4).Value = d(1)  ' Adet
-        xlSheet.Cells(r, 5).Value = d(3)  ' Birim Ağırlık
-        xlSheet.Cells(r, 6).Value = CDbl(d(3)) * CLng(d(1))  ' Toplam Ağırlık
-
-        ' Hücreleri ortala
-        With xlSheet.Range("A" & r & ":F" & r)
-            .HorizontalAlignment = xlHAlignCenter
-            .VerticalAlignment = xlVAlignCenter
-        End With
-
-        r = r + 1
-    Next ii
-
-    ' Toplam satırını ekle
-    xlSheet.Cells(r, 5).Value = "TOPLAM:"
-    xlSheet.Cells(r, 5).Font.Bold = True
-    xlSheet.Cells(r, 6).Formula = "=SUM(F2:F" & (r - 1) & ")"
-    xlSheet.Cells(r, 6).Font.Bold = True
-    xlSheet.Cells(r, 6).Interior.Color = RGB(255, 220, 0)
-
-    With xlSheet.Range("A" & r & ":F" & r)
-        .HorizontalAlignment = xlHAlignCenter
-        .VerticalAlignment = xlVAlignCenter
-    End With
-
-    ' Sayı formatını ayarla ve kenarlık ekle
-    xlSheet.Range("E2:F" & r).NumberFormat = "0.00"
-    xlSheet.Range("A1:F" & r).Borders.LineStyle = 1
-
-    ' Geçici görsel dosyalarını temizle
-    For ii = 1 To orderList.Count
-        k = orderList(ii)
-        d = dict(k)
-        tf = CStr(d(4))
-        If Len(tf) > 0 Then
-            On Error Resume Next
-            If Dir(tf) <> "" Then Kill tf
-            On Error GoTo 0
-        End If
-    Next ii
-
-    ' Excel'i göster
-    SetExcelCalc xlApp, xlCalculationAutomatic
-    xlApp.ScreenUpdating = True
-    xlApp.Visible = True
-    
-    MsgBox "BOM listesi başarıyla oluşturuldu!" & vbCrLf & vbCrLf & _
-           "Toplam " & dict.Count & " farklı parça listelendi.", _
-           vbInformation, "Başarılı"
-    Exit Sub
-
-FATAL:
-    On Error Resume Next
-    SetExcelCalc xlApp, xlCalculationAutomatic
-    If Not xlApp Is Nothing Then xlApp.ScreenUpdating = True
-    MsgBox "Hata oluştu!" & vbCrLf & vbCrLf & _
-           "Hata Kodu: " & Err.Number & vbCrLf & _
-           "Açıklama: " & Err.Description, _
-           vbCritical, "Hata"
-End Sub
-
-' ==============================================================================
-' TÜM BİLEŞENLERİ RECURSIVE OLARAK TOPLA
-' ==============================================================================
-Private Function GetAllComponentsRecursive(ByVal swModel As Object) As Variant
-    Dim allComps As Collection: Set allComps = New Collection
-    Dim swFeat As Object, typ As String, comp As Object
-    
-    ' Feature Tree'yi sırayla tara
-    Set swFeat = swModel.FirstFeature
-    Do While Not swFeat Is Nothing
-        typ = ""
-        On Error Resume Next
-        typ = swFeat.GetTypeName2
-        On Error GoTo 0
-
-        If StrComp(typ, "Reference", vbTextCompare) = 0 Then
-            Set comp = Nothing
-            On Error Resume Next
-            Set comp = swFeat.GetSpecificFeature2
-            On Error GoTo 0
-            
-            If Not comp Is Nothing Then
-                Dim swSubDoc As Object
-                Set swSubDoc = comp.GetModelDoc2
-                
-                If Not swSubDoc Is Nothing Then
-                    If swSubDoc.GetType = swDocPART Then
-                        ' Parça ise direkt ekle
-                        allComps.Add comp
-                    ElseIf swSubDoc.GetType = swDocASSEMBLY Then
-                        ' Alt montaj ise içine gir
-                        CollectPartsFromAssemblyByFeatureTree swSubDoc, allComps
-                    End If
-                End If
-            End If
-        End If
-
-        Set swFeat = swFeat.GetNextFeature
-    Loop
-    
-    ' Collection'ı Array'e dönüştür
-    Dim arr() As Variant, j As Long
-    If allComps.Count > 0 Then
-        ReDim arr(0 To allComps.Count - 1)
-        For j = 1 To allComps.Count
-            Set arr(j - 1) = allComps(j)
-        Next
-    Else
-        arr = Empty
-    End If
-    GetAllComponentsRecursive = arr
 End Function
 
-' ==============================================================================
-' ALT MONTAJDAN PARÇALARI TOPLA (RECURSIVE)
-' ==============================================================================
-Private Sub CollectPartsFromAssemblyByFeatureTree(ByVal swAssy As Object, ByRef allComps As Collection)
-    On Error Resume Next
-    
-    Dim swFeat As Object, typ As String, comp As Object, swSubDoc As Object
-    
-    Set swFeat = swAssy.FirstFeature
-    Do While Not swFeat Is Nothing
-        typ = ""
-        On Error Resume Next
-        typ = swFeat.GetTypeName2
-        On Error GoTo 0
-
-        If StrComp(typ, "Reference", vbTextCompare) = 0 Then
-            Set comp = Nothing
-            On Error Resume Next
-            Set comp = swFeat.GetSpecificFeature2
-            On Error GoTo 0
-            
-            If Not comp Is Nothing Then
-                Set swSubDoc = comp.GetModelDoc2
-                
-                If Not swSubDoc Is Nothing Then
-                    If swSubDoc.GetType = swDocPART Then
-                        allComps.Add comp
-                    ElseIf swSubDoc.GetType = swDocASSEMBLY Then
-                        CollectPartsFromAssemblyByFeatureTree swSubDoc, allComps
-                    End If
-                End If
-            End If
-        End If
-
-        Set swFeat = swFeat.GetNextFeature
-    Loop
-End Sub
-
-' ==============================================================================
-' THUMBNAIL SCRIPT OLUŞTUR
-' ==============================================================================
-Private Function WriteThumbnailScript() As String
-    WriteThumbnailScript = ""
-    On Error Resume Next
-    
-    Dim tmpDir As String: tmpDir = Environ("TEMP")
-    If Right$(tmpDir, 1) <> "\" Then tmpDir = tmpDir & "\"
-    Dim ps1Path As String: ps1Path = tmpDir & "sw_bom_thumb_extractor.ps1"
-
-    Dim ps As String
-    ps = "param([string]$InputFile, [string]$OutputFile, [int]$Size = 256)" & vbCrLf
-    ps = ps & "Add-Type @'" & vbCrLf
-    ps = ps & "using System;" & vbCrLf
-    ps = ps & "using System.Drawing;" & vbCrLf
-    ps = ps & "using System.Drawing.Imaging;" & vbCrLf
-    ps = ps & "using System.Runtime.InteropServices;" & vbCrLf
-    ps = ps & "public class SwThumb {" & vbCrLf
-    ps = ps & "    [DllImport(""shell32.dll"",CharSet=CharSet.Unicode,PreserveSig=false)]" & vbCrLf
-    ps = ps & "    private static extern void SHCreateItemFromParsingName(string p,IntPtr b,ref Guid r,out IntPtr v);" & vbCrLf
-    ps = ps & "    [ComImport,Guid(""bcc18b79-ba16-442f-80c4-8a59c30c463b""),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]" & vbCrLf
-    ps = ps & "    private interface IFactory{void GetImage(SIZE s,int f,out IntPtr h);}" & vbCrLf
-    ps = ps & "    [StructLayout(LayoutKind.Sequential)]" & vbCrLf
-    ps = ps & "    private struct SIZE{public int cx,cy;public SIZE(int x,int y){cx=x;cy=y;}}" & vbCrLf
-    ps = ps & "    public static bool Save(string path,string output,int size){" & vbCrLf
-    ps = ps & "        try{" & vbCrLf
-    ps = ps & "            Guid g=typeof(IFactory).GUID;IntPtr p;" & vbCrLf
-    ps = ps & "            SHCreateItemFromParsingName(path,IntPtr.Zero,ref g,out p);" & vbCrLf
-    ps = ps & "            var f=(IFactory)Marshal.GetObjectForIUnknown(p);" & vbCrLf
-    ps = ps & "            IntPtr h;f.GetImage(new SIZE(size,size),0,out h);" & vbCrLf
-    ps = ps & "            using(var bmp=Image.FromHbitmap(h)){" & vbCrLf
-    ps = ps & "                using(var wb=new Bitmap(size,size)){" & vbCrLf
-    ps = ps & "                    using(var g2=Graphics.FromImage(wb)){" & vbCrLf
-    ps = ps & "                        g2.Clear(Color.White);" & vbCrLf
-    ps = ps & "                        g2.DrawImage(bmp,0,0,size,size);" & vbCrLf
-    ps = ps & "                    }wb.Save(output,ImageFormat.Bmp);}" & vbCrLf
-    ps = ps & "            }return true;" & vbCrLf
-    ps = ps & "        }catch{return false;}}" & vbCrLf
-    ps = ps & "}" & vbCrLf
-    ps = ps & "'@  -ReferencedAssemblies System.Drawing" & vbCrLf
-    ps = ps & "[SwThumb]::Save($InputFile, $OutputFile, $Size) | Out-Null" & vbCrLf
-
-    Dim fNum As Integer: fNum = FreeFile()
-    Open ps1Path For Output As #fNum
-    Print #fNum, ps
-    Close #fNum
-
-    If Dir(ps1Path) <> "" Then WriteThumbnailScript = ps1Path
-    On Error GoTo 0
-End Function
-
-' ==============================================================================
-' THUMBNAIL AL
-' ==============================================================================
-Private Function GetShellThumbnail(ByVal partPath As String, ByVal uid As Long) As String
-    GetShellThumbnail = ""
-    If Len(partPath) = 0 Then Exit Function
-    If Len(m_PS1Path) = 0 Then Exit Function
-
-    On Error Resume Next
-    Dim tmpDir As String: tmpDir = Environ("TEMP")
-    If Right$(tmpDir, 1) <> "\" Then tmpDir = tmpDir & "\"
-    Dim outBMP As String: outBMP = tmpDir & "sw_bom_thumb_" & uid & ".bmp"
-    If Dir(outBMP) <> "" Then Kill outBMP
-
-    Dim cmd As String
-    cmd = "powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File """ & _
-          m_PS1Path & """ """ & partPath & """ """ & outBMP & """ 256"
-
-    Dim wsh As Object
-    Set wsh = CreateObject("WScript.Shell")
-    wsh.Run cmd, 0, True
-
-    If Dir(outBMP) <> "" Then
-        If FileLen(outBMP) > 1000 Then
-            GetShellThumbnail = outBMP
-        Else
-            Kill outBMP
-        End If
-    End If
-    On Error GoTo 0
-End Function
-
-' ==============================================================================
-' KÜTLE HESAPLA (KG)
-' ==============================================================================
-Private Function GetMass_KG(ByVal swComp As Object, _
-                            ByVal swModelDoc As Object, _
-                            ByVal cfg As String) As Double
-    Dim m As Double, v As Variant, prevCfg As String
-    GetMass_KG = 0#
-
-    ' Önce component'ten kütle al
-    On Error Resume Next
-    v = swComp.GetMassProperties2(True)
-    On Error GoTo 0
-    
-    If IsArray(v) Then
-        If UBound(v) >= 5 Then
-            m = 0#
-            On Error Resume Next
-            m = CDbl(v(5))
-            On Error GoTo 0
-            If m > 0# Then
-                GetMass_KG = Round(m, 2)
-                Exit Function
-            End If
-        End If
-    End If
-
-    ' Model document üzerinden dene
-    If swModelDoc Is Nothing Then GoTo try_sw_mass
-    If swModelDoc.GetType <> swDocPART Then GoTo try_sw_mass
-
-    prevCfg = ""
-    On Error Resume Next
-    prevCfg = swModelDoc.GetActiveConfigurationName
-    If Len(cfg) > 0 Then
-        If StrComp(prevCfg, cfg, vbTextCompare) <> 0 Then
-            swModelDoc.ShowConfiguration2 cfg
-        End If
-    End If
-    On Error GoTo 0
-    
-    swModelDoc.EditRebuild3
+' ─────────────────────────────────────────────
+'  AGIRLIK (kg)
+' ─────────────────────────────────────────────
+Private Function GetMassKg(swModel As Object) As Double
 
     Dim mp As Object
-    Set mp = swModelDoc.Extension.CreateMassProperty
-    If Not mp Is Nothing Then
-        mp.UseSystemUnits = True
-        On Error Resume Next
-        mp.IncludeHiddenBodies = True
-        On Error GoTo 0
-        
-        m = 0#
-        On Error Resume Next
-        m = CDbl(mp.Mass)
-        On Error GoTo 0
-        
-        If m > 0# Then
-            GetMass_KG = Round(m, 2)
-            GoTo restore_cfg
-        End If
-    End If
 
-    ' Rebuild dene
-    swModelDoc.ForceRebuild3 True
-    Set mp = swModelDoc.Extension.CreateMassProperty
-    If Not mp Is Nothing Then
-        mp.UseSystemUnits = True
-        On Error Resume Next
-        mp.IncludeHiddenBodies = True
-        On Error GoTo 0
-        
-        m = 0#
-        On Error Resume Next
-        m = CDbl(mp.Mass)
-        On Error GoTo 0
-        
-        If m > 0# Then
-            GetMass_KG = Round(m, 2)
-            GoTo restore_cfg
-        End If
-    End If
+    GetMassKg = 0
+    If swModel Is Nothing Then Exit Function
 
-try_sw_mass:
-    ' SW-Mass custom property'den dene
-    m = GetMassFromSWMassPropertyKG(swModelDoc, cfg)
-    If m > 0# Then GetMass_KG = m
+    On Error GoTo ErrOut
+    Set mp = swModel.Extension.CreateMassProperty
+    If mp Is Nothing Then Exit Function
+    mp.UseSystemUnits = True
+    If mp.Mass > 0 Then GetMassKg = mp.Mass
+    Exit Function
+ErrOut:
+    GetMassKg = 0
 
-restore_cfg:
-    ' Konfigürasyonu eski haline getir
+End Function
+
+' ─────────────────────────────────────────────
+'  MALZEME
+' ─────────────────────────────────────────────
+Private Function GetMalzeme(swModel As Object) As String
+
+    Dim matName As String, matDB As String
+    Dim cp      As Object
+    Dim vO      As String, vR As String, ok As Boolean
+    Dim cfgN    As String
+
+    GetMalzeme = "-"
+    If swModel Is Nothing Then Exit Function
+
+    ' Yontem 1: Dogrudan malzeme adi
     On Error Resume Next
-    If Len(prevCfg) > 0 And Len(cfg) > 0 Then
-        If StrComp(prevCfg, cfg, vbTextCompare) <> 0 Then
-            swModelDoc.ShowConfiguration2 prevCfg
-        End If
+    matName = swModel.GetMaterialPropertyName2("", matDB)
+    On Error GoTo 0
+    If matName <> "" And matName <> "Material not specified" Then
+        GetMalzeme = matName: Exit Function
+    End If
+
+    ' Yontem 2: Genel ozel ozellikler
+    On Error Resume Next
+    Set cp = swModel.Extension.CustomPropertyManager("")
+    If Not cp Is Nothing Then
+        ok = cp.Get5("Material", False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Matiere",  False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Malzeme",  False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Materiau", False, vO, vR, False)
+        If vR <> "" Then GetMalzeme = vR: On Error GoTo 0: Exit Function
     End If
     On Error GoTo 0
-End Function
 
-' ==============================================================================
-' SW-MASS PROPERTY'DEN KÜTLE AL
-' ==============================================================================
-Private Function GetMassFromSWMassPropertyKG(ByVal modelDoc As Object, ByVal cfg As String) As Double
-    Dim mgr As Object, raw As String, res As String
-    GetMassFromSWMassPropertyKG = 0#
-    
+    ' Yontem 3: Konfigurasyon ozel ozellikleri
     On Error Resume Next
-    If modelDoc Is Nothing Then Exit Function
-    
-    Set mgr = modelDoc.Extension.CustomPropertyManager(cfg)
-    If mgr Is Nothing Then Exit Function
-    
-    raw = ""
-    res = ""
-    mgr.Get4 "SW-Mass", False, raw, res
-    GetMassFromSWMassPropertyKG = ParseMassTextToKg(res)
-End Function
-
-' ==============================================================================
-' KÜTLE METNİNİ KG'A ÇEVİR
-' ==============================================================================
-Private Function ParseMassTextToKg(ByVal txt As String) As Double
-    Dim s As String, n As Double, u As String
-    Dim ci As Long, i As Long, j As Long
-    
-    ParseMassTextToKg = 0#
-    s = LCase$(Trim$(txt))
-    If Len(s) = 0 Then Exit Function
-    
-    s = Replace(s, ",", ".")
-    i = 0
-    j = 0
-    
-    ' Sayı kısmını bul
-    For ci = 1 To Len(s)
-        If Mid$(s, ci, 1) Like "[0-9.]" Then
-            i = ci
-            j = ci
-            Do While j <= Len(s) And Mid$(s, j, 1) Like "[0-9.]"
-                j = j + 1
-            Loop
-            Exit For
-        End If
-    Next ci
-    
-    If i = 0 Then Exit Function
-    
-    n = Val(Mid$(s, i, j - i))
-    If n <= 0# Then Exit Function
-    
-    ' Birim kısmını bul ve çevir
-    u = Trim$(Mid$(s, j))
-    If InStr(u, "kg") > 0 Then
-        ParseMassTextToKg = n
-    ElseIf InStr(u, "g") > 0 Then
-        ParseMassTextToKg = n / 1000#
-    ElseIf InStr(u, "lb") > 0 Then
-        ParseMassTextToKg = n * 0.45359237
-    Else
-        ParseMassTextToKg = n
+    cfgN = swModel.GetActiveConfiguration().Name
+    Set cp = swModel.Extension.CustomPropertyManager(cfgN)
+    If Not cp Is Nothing Then
+        ok = cp.Get5("Material", False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Matiere",  False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Malzeme",  False, vO, vR, False)
+        If vR = "" Then ok = cp.Get5("Materiau", False, vO, vR, False)
+        If vR <> "" Then GetMalzeme = vR
     End If
+    On Error GoTo 0
+
 End Function
 
-' ==============================================================================
-' MALZEME BİLGİSİNİ AL
-' ==============================================================================
-Private Function GetMaterialSafe(ByVal modelDoc As Object, ByVal cfg As String) As String
-    Dim mat As String, db As String
-    
-    On Error Resume Next
-    mat = modelDoc.GetMaterialPropertyName2(cfg, db)
-    If Len(Trim$(mat)) > 0 Then
-        GetMaterialSafe = Trim$(mat)
-        Exit Function
-    End If
-    
-    ' Body'lerden malzeme almayı dene
-    If modelDoc.GetType = swDocPART Then
-        Dim vB As Variant, j As Long, swB As Object
-        Dim bM As String, bD As String
-        
-        vB = modelDoc.GetBodies2(0, True)
-        If IsArray(vB) Then
-            For j = LBound(vB) To UBound(vB)
-                Set swB = vB(j)
-                If Not swB Is Nothing Then
-                    bM = swB.GetMaterialPropertyName2(cfg, bD)
-                    If Len(Trim$(bM)) > 0 Then
-                        GetMaterialSafe = Trim$(bM)
-                        Exit Function
-                    End If
-                End If
-            Next j
-        End If
-    End If
-    
-    GetMaterialSafe = "-"
+' ─────────────────────────────────────────────
+'  DOSYA ADI (uzantisiz)
+' ─────────────────────────────────────────────
+Private Function FileNameNoExt(fullPath As String) As String
+
+    Dim s As Integer, d As Integer, nm As String
+
+    If Trim(fullPath) = "" Then FileNameNoExt = "Bilinmiyor": Exit Function
+
+    On Error GoTo ErrOut
+    s  = InStrRev(fullPath, "\")
+    nm = IIf(s > 0, Mid(fullPath, s + 1), fullPath)
+    d  = InStrRev(nm, ".")
+    FileNameNoExt = IIf(d > 0, Left(nm, d - 1), nm)
+    Exit Function
+ErrOut:
+    FileNameNoExt = "Bilinmiyor"
+
 End Function
 
-' ==============================================================================
-' YARDIMCI FONKSİYONLAR
-' ==============================================================================
-Private Function SafeIsSuppressed(ByVal c As Object) As Boolean
-    SafeIsSuppressed = False
-    If c Is Nothing Then Exit Function
-    On Error Resume Next
-    SafeIsSuppressed = CBool(c.IsSuppressed)
-End Function
+' ─────────────────────────────────────────────
+'  BOS BEYAZ BMP OLUSTUR (resim alinamazsa)
+' ─────────────────────────────────────────────
+Private Sub CreateWhiteBmp(filePath As String, w As Integer, h As Integer)
 
-Private Function SafeIsEnvelope(ByVal c As Object) As Boolean
-    SafeIsEnvelope = False
-    If c Is Nothing Then Exit Function
-    On Error Resume Next
-    SafeIsEnvelope = CBool(c.IsEnvelope)
-End Function
+    Dim fn  As Integer, rs As Long, fs As Long
+    Dim i   As Long, j As Long, pad As Long
+    Dim b(53) As Byte, px(2) As Byte, z As Byte
 
-Private Function SafeExcludeFromBOM(ByVal c As Object) As Boolean
-    SafeExcludeFromBOM = False
-    If c Is Nothing Then Exit Function
-    On Error Resume Next
-    SafeExcludeFromBOM = CBool(c.ExcludeFromBOM)
-End Function
+    rs = (CLng(w) * 3 + 3) And &HFFFFFFFC
+    fs = 54 + rs * CLng(h)
 
-Private Function GetCleanName(ByVal n As String) As String
-    Dim s As String: s = Trim$(n)
-    
-    ' "/" karakterinden öncesini al
-    Dim p As Long: p = InStr(s, "/")
-    If p > 0 Then s = Left$(s, p - 1)
-    
-    ' Son "-" ve sayı kısmını temizle
-    Dim d As Long: d = InStrRev(s, "-")
-    If d > 0 Then
-        If IsNumeric(Mid$(s, d + 1)) Then
-            s = Left$(s, d - 1)
-        End If
-    End If
-    
-    GetCleanName = Trim$(s)
-End Function
+    b(0) = 66: b(1) = 77
+    b(2) = CByte(fs And 255)
+    b(3) = CByte((fs \ 256) And 255)
+    b(4) = CByte((fs \ 65536) And 255)
+    b(5) = CByte((fs \ 16777216) And 255)
+    b(10) = 54: b(14) = 40
+    b(18) = CByte(w And 255): b(19) = CByte((w \ 256) And 255)
+    b(22) = CByte(h And 255): b(23) = CByte((h \ 256) And 255)
+    b(26) = 1: b(28) = 24
 
-Private Function GetExcelCalc(ByVal xlApp As Object) As Long
-    On Error Resume Next
-    GetExcelCalc = xlApp.Calculation
-    If Err.Number <> 0 Then GetExcelCalc = xlCalculationAutomatic
-End Function
+    px(0) = 255: px(1) = 255: px(2) = 255
+    z = 0: pad = rs - CLng(w) * 3
 
-Private Sub SetExcelCalc(ByVal xlApp As Object, ByVal modeVal As Long)
-    On Error Resume Next
-    xlApp.Calculation = modeVal
+    fn = FreeFile
+    Open filePath For Binary As #fn
+    For i = 0 To 53: Put #fn, , b(i): Next i
+    For i = 1 To h
+        For j = 1 To w: Put #fn, , px: Next j
+        Dim k As Long
+        For k = 1 To pad: Put #fn, , z: Next k
+    Next i
+    Close #fn
+
 End Sub
+
+' ─────────────────────────────────────────────
+'  EXCEL'E YAZMA + RESIM EKLEME
+' ─────────────────────────────────────────────
+Private Sub WriteToExcel(rows As Collection, swApp As Object)
+
+    Dim xlApp  As Object
+    Dim xlWb   As Object
+    Dim xlWs   As Object
+    Dim rowNum As Long
+    Dim siraNo As Long
+    Dim i      As Long
+    Dim r      As CBomRow
+
+    ' ── Excel baglantisi ──
+    On Error Resume Next: Set xlApp = GetObject(, "Excel.Application"): On Error GoTo 0
+    If xlApp Is Nothing Then Set xlApp = CreateObject("Excel.Application")
+
+    xlApp.Visible = True
+    Set xlWb = xlApp.Workbooks.Add
+    Set xlWs = xlWb.Sheets(1)
+    xlWs.Name = "BOM"
+
+    xlApp.ScreenUpdating = False
+    xlApp.Calculation = -4135  ' xlCalculationManual
+
+    ' ── Baslik satiri ──
+    Dim headers As Variant
+    headers = Array("Resim", "Sira No", "Parca Adi", "Konfigurasyon", _
+                    "Malzeme", "Miktar", "Birim Agirlik (kg)", "Net Agirlik (kg)")
+    Dim col As Integer
+    For col = 0 To 7
+        xlWs.Cells(1, col + 1).Value = headers(col)
+    Next col
+
+    With xlWs.Range("A1:H1")
+        .Interior.Color      = RGB(31, 73, 125)
+        .Font.Color          = RGB(255, 255, 255)
+        .Font.Bold           = True
+        .Font.Size           = 11
+        .HorizontalAlignment = -4108  ' xlCenter
+        .VerticalAlignment   = -4108  ' xlCenter
+        .RowHeight           = 22
+    End With
+
+    xlWs.Columns("A").ColumnWidth = 11
+
+    ' ── Veri satirlari (resimler haric) ──
+    rowNum = 2
+    siraNo = 0
+
+    For i = 1 To rows.Count
+        Set r  = rows(i)
+        siraNo = siraNo + 1
+
+        xlWs.Rows(rowNum).RowHeight = 50
+
+        With xlWs.Range("A" & rowNum & ":H" & rowNum)
+            .HorizontalAlignment = -4108
+            .VerticalAlignment   = -4108
+        End With
+
+        xlWs.Cells(rowNum, 2).Value = siraNo
+        xlWs.Cells(rowNum, 3).Value = r.parcaAdi
+        xlWs.Cells(rowNum, 4).Value = r.konfig
+        If r.malzeme <> "-" Then xlWs.Cells(rowNum, 5).Value = r.malzeme
+        xlWs.Cells(rowNum, 6).Value = r.miktar
+
+        If Not r.modelAcik Then
+            xlWs.Cells(rowNum, 7).Value = "?"
+            xlWs.Cells(rowNum, 8).Value = "?"
+        Else
+            xlWs.Cells(rowNum, 7).NumberFormat = "0.00"
+            xlWs.Cells(rowNum, 7).Value = Round(r.agirlik, 2)
+            xlWs.Cells(rowNum, 8).NumberFormat = "0.00"
+            xlWs.Cells(rowNum, 8).Value = Round(Round(r.agirlik, 2) * r.miktar, 2)
+        End If
+
+        rowNum = rowNum + 1
+    Next i
+
+    ' ── Resimleri ekle (kayma duzeltmeli) ──
+    '
+    '  Excel .Top degerini ekranda gorunmeyen satirlar icin yanlis
+    '  hesaplar ve asagi satirlarda hata birikir. Cozum:
+    '   • Her resimden once ScrollRow ile satira git
+    '   • DoEvents ile Excel'e repaint firsati ver
+    '   • Placement = 1 ile resmi hucreye civile
+    '   • Son bir pozisyon teyidi yap
+    '
+    xlApp.ScreenUpdating = True
+    DoEvents: DoEvents
+
+    Dim pic      As Object
+    Dim tempPath As String
+    Dim cellW    As Double, cellH As Double
+    Dim imgSz    As Double
+    Dim imgL     As Double, imgT As Double
+    Dim shp      As Object
+
+    rowNum = 2
+    For i = 1 To rows.Count
+        Set r    = rows(i)
+        tempPath = Environ("TEMP") & "\sw_bom_" & rowNum & ".bmp"
+
+        ' Preview bitmap al
+        Set pic = Nothing
+        On Error Resume Next: Set pic = swApp.GetPreviewBitmap(r.dosyaYolu, r.konfig): On Error GoTo 0
+
+        If pic Is Nothing Then
+            CreateWhiteBmp tempPath, 40, 40
+        Else
+            On Error Resume Next: SavePicture pic, tempPath: On Error GoTo 0
+            If Dir(tempPath) = "" Then CreateWhiteBmp tempPath, 40, 40
+        End If
+
+        If Dir(tempPath) <> "" Then
+
+            ' (1) Satira scroll → .Top dogru hesaplanir
+            On Error Resume Next: xlApp.ActiveWindow.ScrollRow = rowNum: On Error GoTo 0
+            DoEvents
+
+            ' (2) Hucre olculeri ve resim boyutu
+            cellW = xlWs.Cells(rowNum, 1).Width
+            cellH = xlWs.Rows(rowNum).RowHeight
+            imgSz = cellH - 10
+            If (cellW - 10) < imgSz Then imgSz = cellW - 10
+            If imgSz < 8 Then imgSz = 8
+
+            imgL = xlWs.Cells(rowNum, 1).Left + (cellW - imgSz) / 2
+            imgT = xlWs.Cells(rowNum, 1).Top + (cellH - imgSz) / 2
+
+            ' (3) Resim ekle
+            Set shp = Nothing
+            On Error Resume Next
+            Set shp = xlWs.Shapes.AddPicture(tempPath, False, True, imgL, imgT, imgSz, imgSz)
+            On Error GoTo 0
+
+            If Not shp Is Nothing Then
+                On Error Resume Next
+                shp.Placement = 1        ' xlMoveAndSizeWithCells — hucreye civile
+                shp.LockAspectRatio = False
+
+                ' (4) Pozisyon teyidi
+                shp.Top    = xlWs.Cells(rowNum, 1).Top + (cellH - imgSz) / 2
+                shp.Left   = xlWs.Cells(rowNum, 1).Left + (cellW - imgSz) / 2
+                shp.Width  = imgSz
+                shp.Height = imgSz
+                On Error GoTo 0
+                Set shp = Nothing
+            End If
+
+            On Error Resume Next: Kill tempPath: On Error GoTo 0
+        End If
+
+        rowNum = rowNum + 1
+    Next i
+
+    ' Basa don
+    On Error Resume Next: xlApp.ActiveWindow.ScrollRow = 1: On Error GoTo 0
+
+    xlApp.ScreenUpdating = False
+
+    ' ── Toplam satiri ──
+    With xlWs.Range("A" & rowNum & ":H" & rowNum)
+        .Interior.Color = RGB(31, 73, 125)
+        .Font.Color     = RGB(255, 255, 255)
+        .Font.Bold      = True
+    End With
+
+    xlWs.Cells(rowNum, 7).Value               = "TOPLAM"
+    xlWs.Cells(rowNum, 7).HorizontalAlignment = -4131  ' xlRight
+    xlWs.Cells(rowNum, 8).NumberFormat         = "0.00"
+    xlWs.Cells(rowNum, 8).Formula              = "=SUM(H2:H" & rowNum - 1 & ")"
+    xlWs.Cells(rowNum, 8).HorizontalAlignment  = -4108  ' xlCenter
+
+    ' ── Kenarliklar ──
+    With xlWs.Range("A1:H" & rowNum).Borders
+        .LineStyle = 1
+        .Weight    = 2
+        .Color     = RGB(180, 180, 180)
+    End With
+
+    ' ── Sutun genislikleri ──
+    xlWs.Columns("B:H").AutoFit
+    xlWs.Columns("C").ColumnWidth = 30
+    xlWs.Columns("E").ColumnWidth = 20
+
+    xlApp.Calculation    = -4105  ' xlCalculationAutomatic
+    xlApp.ScreenUpdating = True
+
+    ' ── Baslik dondur ──
+    xlWs.Rows("2:2").Select
+    xlApp.ActiveWindow.FreezePanes = True
+    xlWs.Cells(1, 1).Select
+
+End Sub
+
+' ══════════════════════════════════════════════════════════════════
+' ══  MODULE KODU BITIS                                         ══
+' ══════════════════════════════════════════════════════════════════
+
+
+
+
+' ══════════════════════════════════════════════════════════════════
+' ══  CLASS KODU BASLANGIC                                      ══
+' ══  Insert > Class Module → Name = "CBomRow"                  ══
+' ══════════════════════════════════════════════════════════════════
+
+' --- Asagidaki kodu CBomRow isimli Class Module'e yapistirin ---
+' --- ONEMLI: Satirlarin basindaki tek tirnak (') isaretlerini silin ---
+
+'Option Explicit
+'
+'Public parcaAdi  As String
+'Public konfig    As String
+'Public dosyaYolu As String
+'Public miktar    As Long
+'Public key       As String
+'Public modelAcik As Boolean
+'Public agirlik   As Double
+'Public malzeme   As String
+
+' ══════════════════════════════════════════════════════════════════
+' ══  CLASS KODU BITIS                                          ══
+' ══════════════════════════════════════════════════════════════════
